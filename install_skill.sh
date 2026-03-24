@@ -3,14 +3,21 @@
 set -euo pipefail
 
 SKILL_NAME="skill-creator"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_SKILL_DIR="${SCRIPT_DIR}/${SKILL_NAME}"
-VALIDATOR="${SOURCE_SKILL_DIR}/scripts/quick_validate.py"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+DEFAULT_REPO="feddericovonwernich/opencode-skill-creator"
+DEFAULT_REF="main"
+
+SOURCE_SKILL_DIR=""
+VALIDATOR=""
+TMP_ROOT=""
 
 SCOPE="project"
 PROJECT_DIR=""
 FORCE=0
 DRY_RUN=0
+REPO="${DEFAULT_REPO}"
+REF="${DEFAULT_REF}"
 
 usage() {
   cat <<'EOF'
@@ -22,6 +29,8 @@ Usage:
 Options:
   --scope <project|user|both>  Install target scope (default: project)
   --project-dir <path>         Project root for project/both scope (default: current directory)
+  --repo <owner/name>          GitHub repo to download from when piped (default: feddericovonwernich/opencode-skill-creator)
+  --ref <git-ref>              Git branch/tag/commit for remote download (default: main)
   --force                      Replace an existing installation target
   --dry-run                    Show what would happen without making changes
   -h, --help                   Show this help text
@@ -30,6 +39,7 @@ Examples:
   bash install_skill.sh --scope project --project-dir /path/to/project
   bash install_skill.sh --scope user
   bash install_skill.sh --scope both --project-dir /path/to/project --force
+  curl -fsSL https://raw.githubusercontent.com/feddericovonwernich/opencode-skill-creator/main/install_skill.sh | bash -s -- --scope user --force
 EOF
 }
 
@@ -46,6 +56,17 @@ require_python() {
   command -v python3 >/dev/null 2>&1 || die "python3 is required to validate SKILL.md"
 }
 
+require_command() {
+  local cmd="$1"
+  command -v "${cmd}" >/dev/null 2>&1 || die "Required command not found: ${cmd}"
+}
+
+cleanup() {
+  if [[ -n "${TMP_ROOT}" && -d "${TMP_ROOT}" ]]; then
+    rm -rf "${TMP_ROOT}"
+  fi
+}
+
 abs_path() {
   python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$1"
 }
@@ -57,6 +78,38 @@ validate_skill() {
     die "Validation failed for ${skill_dir}: ${output}"
   fi
   info "   ${output}"
+}
+
+resolve_source_skill() {
+  local local_source="${SCRIPT_DIR}/${SKILL_NAME}"
+  local local_validator="${local_source}/scripts/quick_validate.py"
+
+  if [[ -f "${local_source}/SKILL.md" && -f "${local_validator}" ]]; then
+    SOURCE_SKILL_DIR="${local_source}"
+    VALIDATOR="${local_validator}"
+    return
+  fi
+
+  require_command curl
+  require_command tar
+
+  TMP_ROOT="$(mktemp -d)"
+  local archive_url="https://github.com/${REPO}/archive/${REF}.tar.gz"
+  info "Local skill bundle not found. Downloading ${REPO}@${REF}..."
+
+  if ! curl -fsSL "${archive_url}" | tar -xz -C "${TMP_ROOT}"; then
+    die "Unable to download or extract ${archive_url}"
+  fi
+
+  local extracted_repo
+  extracted_repo="$(find "${TMP_ROOT}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  [[ -n "${extracted_repo}" ]] || die "Could not locate extracted repository directory"
+
+  SOURCE_SKILL_DIR="${extracted_repo}/${SKILL_NAME}"
+  VALIDATOR="${SOURCE_SKILL_DIR}/scripts/quick_validate.py"
+
+  [[ -f "${SOURCE_SKILL_DIR}/SKILL.md" ]] || die "Downloaded repository does not contain ${SKILL_NAME}/SKILL.md"
+  [[ -f "${VALIDATOR}" ]] || die "Downloaded repository does not contain ${SKILL_NAME}/scripts/quick_validate.py"
 }
 
 copy_skill() {
@@ -122,6 +175,16 @@ parse_args() {
         PROJECT_DIR="$2"
         shift 2
         ;;
+      --repo)
+        [[ $# -ge 2 ]] || die "Missing value for --repo"
+        REPO="$2"
+        shift 2
+        ;;
+      --ref)
+        [[ $# -ge 2 ]] || die "Missing value for --ref"
+        REF="$2"
+        shift 2
+        ;;
       --force)
         FORCE=1
         shift
@@ -142,11 +205,10 @@ parse_args() {
 }
 
 main() {
+  trap cleanup EXIT
   parse_args "$@"
   require_python
-
-  [[ -d "${SOURCE_SKILL_DIR}" ]] || die "Source skill directory not found: ${SOURCE_SKILL_DIR}"
-  [[ -f "${VALIDATOR}" ]] || die "Validator not found: ${VALIDATOR}"
+  resolve_source_skill
 
   case "${SCOPE}" in
     project|user|both) ;;
@@ -160,6 +222,7 @@ main() {
     resolved_project_dir="$(pwd)"
   fi
 
+  info "Using source: ${SOURCE_SKILL_DIR}"
   validate_skill "${SOURCE_SKILL_DIR}"
 
   local targets=()
